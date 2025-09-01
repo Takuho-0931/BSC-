@@ -1,0 +1,588 @@
+import React, { useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import { Download, Plus, Trash2, Wand2, Upload, FileJson, Table, Target, LineChart, ChevronRight } from "lucide-react";
+
+// --- Types ---
+export type PerspectiveKey = "Financial" | "Customer" | "Internal" | "Learning";
+
+type KPI = {
+  id: string;
+  name: string;
+  description?: string;
+  unit?: string; // 例: %, 件, 円/月
+  target?: number;
+  actual?: number;
+  weight?: number; // 0-100
+  datasource?: string; // 例: GA4: event, CRM: deals
+  frequency?: "weekly" | "monthly" | "quarterly" | "yearly";
+};
+
+type Initiative = {
+  id: string;
+  title: string;
+  owner?: string;
+  start?: string; // ISO
+  end?: string;   // ISO
+  budgetJPY?: number;
+  notes?: string;
+};
+
+type Objective = {
+  id: string;
+  title: string;
+  rationale?: string;
+  perspective: PerspectiveKey;
+  kpis: KPI[];
+  initiatives: Initiative[];
+  dependsOn?: string[]; // objective ids this objective depends on (for strategy map)
+};
+
+type BSC = {
+  orgName: string;
+  vision: string;
+  fiscalYear: string; // 例: 2025
+  strategicThemes: string[];
+  objectives: Objective[];
+};
+
+// --- Utility helpers ---
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const PERSPECTIVES: { key: PerspectiveKey; label: string; color: string }[] = [
+  { key: "Financial", label: "財務", color: "#0f766e" },
+  { key: "Customer", label: "顧客", color: "#7c3aed" },
+  { key: "Internal", label: "内部プロセス", color: "#1d4ed8" },
+  { key: "Learning", label: "学習と成長", color: "#b45309" },
+];
+
+const KPI_SUGGESTIONS: Record<PerspectiveKey, { name: string; unit?: string; description?: string }[]> = {
+  Financial: [
+    { name: "売上高成長率", unit: "%", description: "前年比の売上成長" },
+    { name: "営業利益率", unit: "%" },
+    { name: "LTV", unit: "円/顧客" },
+    { name: "CAC回収期間", unit: "月" },
+    { name: "解約率", unit: "%/月" },
+  ],
+  Customer: [
+    { name: "NPS", unit: "スコア" },
+    { name: "顧客満足度(CSAT)", unit: "点" },
+    { name: "紹介率", unit: "%" },
+    { name: "無料→有料転換率", unit: "%" },
+    { name: "継続率(90日)", unit: "%" },
+  ],
+  Internal: [
+    { name: "新機能提供リードタイム", unit: "日" },
+    { name: "不具合再発率", unit: "%" },
+    { name: "一次解決率(サポート)", unit: "%" },
+    { name: "コンテンツ制作サイクルタイム", unit: "日" },
+    { name: "自動化比率", unit: "%" },
+  ],
+  Learning: [
+    { name: "学習時間/人", unit: "時間/月" },
+    { name: "スキルマトリクス達成度", unit: "%" },
+    { name: "改善提案件数", unit: "件/月" },
+    { name: "心理的安全性スコア", unit: "点" },
+    { name: "採用リードタイム", unit: "日" },
+  ],
+};
+
+const DEFAULT_THEMES = [
+  "収益性の改善",
+  "ファン化と継続率の向上",
+  "品質とスピードの両立",
+  "人と学びへの投資",
+];
+
+// スコア計算: KPIごとに(実績/目標)で達成率を計算し、重み付き平均
+function computePerspectiveScore(objs: Objective[], perspective: PerspectiveKey) {
+  const kpis = objs.filter(o => o.perspective === perspective).flatMap(o => o.kpis);
+  if (kpis.length === 0) return null;
+  let totalWeight = 0;
+  let acc = 0;
+  for (const k of kpis) {
+    const w = (k.weight ?? 0) / 100;
+    if (!k.target || k.target === 0 || k.actual == null) continue;
+    const raw = k.actual / k.target; // 1.0で目標達成
+    const clipped = Math.max(0, Math.min(raw, 1.2)); // 上限120%で頭打ち
+    acc += clipped * w;
+    totalWeight += w;
+  }
+  if (totalWeight === 0) return null;
+  return (acc / totalWeight) * 100; // 0-120% を想定
+}
+
+function ragColor(p: number | null) {
+  if (p == null) return "bg-gray-200 text-gray-600";
+  if (p >= 100) return "bg-green-100 text-green-800";
+  if (p >= 80) return "bg-yellow-100 text-yellow-800";
+  return "bg-red-100 text-red-800";
+}
+
+// --- Main Component ---
+export default function App() {
+  const [bsc, setBSC] = useState<BSC>({
+    orgName: "プレグリッシュ（仮）",
+    vision: "学びの本質的な楽しさで、子どもの未来を拓く",
+    fiscalYear: "2025",
+    strategicThemes: DEFAULT_THEMES,
+    objectives: [],
+  });
+
+  const [selectedPerspective, setSelectedPerspective] = useState<PerspectiveKey>("Financial");
+
+  const byPerspective = useMemo(() => {
+    const map: Record<PerspectiveKey, Objective[]> = { Financial: [], Customer: [], Internal: [], Learning: [] };
+    for (const o of bsc.objectives) map[o.perspective].push(o);
+    return map;
+  }, [bsc.objectives]);
+
+  const scores = {
+    Financial: computePerspectiveScore(bsc.objectives, "Financial"),
+    Customer: computePerspectiveScore(bsc.objectives, "Customer"),
+    Internal: computePerspectiveScore(bsc.objectives, "Internal"),
+    Learning: computePerspectiveScore(bsc.objectives, "Learning"),
+  };
+
+  function addObjective(p: PerspectiveKey) {
+    const id = uid();
+    const o: Objective = { id, title: "", perspective: p, kpis: [], initiatives: [] };
+    setBSC(v => ({ ...v, objectives: [...v.objectives, o] }));
+  }
+
+  function removeObjective(id: string) {
+    setBSC(v => ({ ...v, objectives: v.objectives.filter(o => o.id !== id) }));
+  }
+
+  function addKPI(objectiveId: string, partial?: Partial<KPI>) {
+    setBSC(v => ({
+      ...v,
+      objectives: v.objectives.map(o =>
+        o.id === objectiveId
+          ? {
+              ...o,
+              kpis: [
+                ...o.kpis,
+                { id: uid(), name: "", unit: "", target: undefined, actual: undefined, weight: 10, ...partial },
+              ],
+            }
+          : o,
+      ),
+    }));
+  }
+
+  function removeKPI(objectiveId: string, kpiId: string) {
+    setBSC(v => ({
+      ...v,
+      objectives: v.objectives.map(o =>
+        o.id === objectiveId ? { ...o, kpis: o.kpis.filter(k => k.id !== kpiId) } : o,
+      ),
+    }));
+  }
+
+  function addInitiative(objectiveId: string) {
+    setBSC(v => ({
+      ...v,
+      objectives: v.objectives.map(o =>
+        o.id === objectiveId
+          ? { ...o, initiatives: [...o.initiatives, { id: uid(), title: "" }] }
+          : o,
+      ),
+    }));
+  }
+
+  function removeInitiative(objectiveId: string, initId: string) {
+    setBSC(v => ({
+      ...v,
+      objectives: v.objectives.map(o =>
+        o.id === objectiveId ? { ...o, initiatives: o.initiatives.filter(i => i.id !== initId) } : o,
+      ),
+    }));
+  }
+
+  function suggestKPIs(objectiveId: string, perspective: PerspectiveKey) {
+    const defs = KPI_SUGGESTIONS[perspective].slice(0, 3);
+    for (const d of defs) addKPI(objectiveId, { name: d.name, unit: d.unit });
+  }
+
+  function exportJSON() {
+    const blob = new Blob([JSON.stringify(bsc, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `BSC_${bsc.orgName}_${bsc.fiscalYear}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportCSV() {
+    // Export KPIs flat (Perspective,Objective,KPI,Target,Actual,Weight,Unit,Owner)
+    const rows: string[] = [
+      ["Perspective","Objective","KPI","Target","Actual","Weight","Unit","Datasource","Frequency"].join(","),
+    ];
+    for (const o of bsc.objectives) {
+      for (const k of o.kpis) {
+        rows.push([
+          o.perspective,
+          escapeCSV(o.title),
+          escapeCSV(k.name),
+          k.target ?? "",
+          k.actual ?? "",
+          k.weight ?? "",
+          k.unit ?? "",
+          k.datasource ?? "",
+          k.frequency ?? "",
+        ].join(","));
+      }
+    }
+    const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `BSC_KPIs_${bsc.orgName}_${bsc.fiscalYear}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function importJSON(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result));
+        setBSC(data);
+      } catch (err) {
+        alert("JSONの読み込みに失敗しました");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  return (
+    <div className="min-h-screen w-full bg-white text-gray-900">
+      <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
+          <LineChart className="w-6 h-6" />
+          <h1 className="text-xl font-bold">BSC AIツール MVP</h1>
+          <span className="ml-auto flex gap-2">
+            <button onClick={exportJSON} className="px-3 py-1.5 rounded-xl border flex items-center gap-2 hover:bg-gray-50"><FileJson className="w-4 h-4"/>JSON</button>
+            <button onClick={exportCSV} className="px-3 py-1.5 rounded-xl border flex items-center gap-2 hover:bg-gray-50"><Table className="w-4 h-4"/>CSV</button>
+            <label className="px-3 py-1.5 rounded-xl border flex items-center gap-2 hover:bg-gray-50 cursor-pointer">
+              <Upload className="w-4 h-4"/>Import JSON
+              <input type="file" accept="application/json" className="hidden" onChange={importJSON}/>
+            </label>
+          </span>
+        </div>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-4 py-6 grid md:grid-cols-3 gap-6">
+        <section className="md:col-span-3 grid md:grid-cols-3 gap-4">
+          <div className="p-4 rounded-2xl border bg-gray-50">
+            <label className="text-xs text-gray-500">組織名</label>
+            <input className="w-full mt-1 px-3 py-2 rounded-xl border" value={bsc.orgName} onChange={e=>setBSC(v=>({...v, orgName: e.target.value}))}/>
+          </div>
+          <div className="p-4 rounded-2xl border bg-gray-50">
+            <label className="text-xs text-gray-500">ビジョン</label>
+            <input className="w-full mt-1 px-3 py-2 rounded-xl border" value={bsc.vision} onChange={e=>setBSC(v=>({...v, vision: e.target.value}))}/>
+          </div>
+          <div className="p-4 rounded-2xl border bg-gray-50">
+            <label className="text-xs text-gray-500">年度</label>
+            <input className="w-full mt-1 px-3 py-2 rounded-xl border" value={bsc.fiscalYear} onChange={e=>setBSC(v=>({...v, fiscalYear: e.target.value}))}/>
+          </div>
+          <div className="md:col-span-3 p-4 rounded-2xl border bg-gray-50">
+            <label className="text-xs text-gray-500">戦略テーマ（改行で追加）</label>
+            <textarea className="w-full mt-1 px-3 py-2 rounded-xl border h-20" value={bsc.strategicThemes.join("\n")} onChange={e=>setBSC(v=>({...v, strategicThemes: e.target.value.split(/\n+/).filter(Boolean)}))}/>
+          </div>
+        </section>
+
+        {/* Scorecards */}
+        <section className="md:col-span-2 space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {PERSPECTIVES.map(p => (
+              <button key={p.key} onClick={()=>setSelectedPerspective(p.key)}
+                className={`rounded-2xl border p-3 text-left hover:shadow-sm ${selectedPerspective===p.key?"ring-2 ring-black":""}`}>
+                <div className="text-xs text-gray-500">{p.label}</div>
+                <div className="flex items-center gap-2 mt-1">
+                  <div className="w-2 h-2 rounded-full" style={{backgroundColor:p.color}}/>
+                  <div className={`text-sm px-2 py-0.5 rounded ${ragColor(scores[p.key])}`}>{scores[p.key]==null?"—":`${scores[p.key]!.toFixed(0)}%`}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          <div className="rounded-2xl border">
+            <div className="p-3 border-b flex items-center gap-2">
+              <Target className="w-4 h-4"/>
+              <div className="font-semibold">{PERSPECTIVES.find(x=>x.key===selectedPerspective)?.label}の目標</div>
+              <button onClick={()=>addObjective(selectedPerspective)} className="ml-auto px-3 py-1.5 rounded-xl border flex items-center gap-1 hover:bg-gray-50"><Plus className="w-4 h-4"/>追加</button>
+            </div>
+
+            <div className="divide-y">
+              {byPerspective[selectedPerspective].length===0 && (
+                <div className="p-6 text-sm text-gray-500">目標（Objective）を追加してください。</div>
+              )}
+              {byPerspective[selectedPerspective].map((o) => (
+                <div key={o.id} className="p-4">
+                  <div className="flex gap-2 items-center">
+                    <input className="flex-1 px-3 py-2 rounded-xl border" placeholder="例: LTVの最大化" value={o.title} onChange={e=>setBSC(v=>({...v, objectives: v.objectives.map(x=>x.id===o.id?{...x, title:e.target.value}:x)}))}/>
+                    <button className="p-2 rounded-xl border hover:bg-gray-50" onClick={()=>suggestKPIs(o.id, o.perspective)}><Wand2 className="w-4 h-4"/></button>
+                    <button className="p-2 rounded-xl border hover:bg-gray-50" onClick={()=>removeObjective(o.id)}><Trash2 className="w-4 h-4"/></button>
+                  </div>
+                  <textarea className="w-full mt-2 px-3 py-2 rounded-xl border" placeholder="目的・仮説・根拠（なぜこの目標か）" value={o.rationale ?? ""} onChange={e=>setBSC(v=>({...v, objectives: v.objectives.map(x=>x.id===o.id?{...x, rationale:e.target.value}:x)}))}/>
+
+                  {/* KPI table */}
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="min-w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-gray-500 border-b">
+                          <th className="py-2 pr-2">KPI</th>
+                          <th className="py-2 pr-2">単位</th>
+                          <th className="py-2 pr-2">目標</th>
+                          <th className="py-2 pr-2">実績</th>
+                          <th className="py-2 pr-2">重み(%)</th>
+                          <th className="py-2 pr-2">頻度</th>
+                          <th className="py-2 pr-2">データソース</th>
+                          <th className="py-2 pl-2">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {o.kpis.map(k => (
+                          <tr key={k.id} className="border-b">
+                            <td className="py-1 pr-2"><input className="w-56 px-2 py-1 rounded border" value={k.name} onChange={e=>updateKPI(o.id, k.id, { name:e.target.value })}/></td>
+                            <td className="py-1 pr-2"><input className="w-20 px-2 py-1 rounded border" value={k.unit ?? ""} onChange={e=>updateKPI(o.id, k.id, { unit:e.target.value })}/></td>
+                            <td className="py-1 pr-2"><input type="number" className="w-24 px-2 py-1 rounded border" value={k.target ?? ""} onChange={e=>updateKPI(o.id, k.id, { target: numOrUndef(e.target.value) })}/></td>
+                            <td className="py-1 pr-2"><input type="number" className="w-24 px-2 py-1 rounded border" value={k.actual ?? ""} onChange={e=>updateKPI(o.id, k.id, { actual: numOrUndef(e.target.value) })}/></td>
+                            <td className="py-1 pr-2"><input type="number" className="w-20 px-2 py-1 rounded border" value={k.weight ?? 10} onChange={e=>updateKPI(o.id, k.id, { weight: numOrUndef(e.target.value) })}/></td>
+                            <td className="py-1 pr-2">
+                              <select className="w-28 px-2 py-1 rounded border" value={k.frequency ?? "monthly"} onChange={e=>updateKPI(o.id, k.id, { frequency: e.target.value as any })}>
+                                <option value="weekly">毎週</option>
+                                <option value="monthly">毎月</option>
+                                <option value="quarterly">四半期</option>
+                                <option value="yearly">年次</option>
+                              </select>
+                            </td>
+                            <td className="py-1 pr-2"><input className="w-44 px-2 py-1 rounded border" placeholder="例: GA4: conversion" value={k.datasource ?? ""} onChange={e=>updateKPI(o.id, k.id, { datasource:e.target.value })}/></td>
+                            <td className="py-1 pl-2">
+                              <button className="p-1 rounded border hover:bg-gray-50" onClick={()=>removeKPI(o.id, k.id)}><Trash2 className="w-4 h-4"/></button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="mt-2">
+                    <button onClick={()=>addKPI(o.id)} className="px-3 py-1.5 rounded-xl border flex items-center gap-1 hover:bg-gray-50 text-sm"><Plus className="w-4 h-4"/>KPI追加</button>
+                  </div>
+
+                  {/* Initiatives */}
+                  <div className="mt-4">
+                    <div className="text-xs text-gray-500 mb-1">主な取り組み</div>
+                    {o.initiatives.map(i => (
+                      <div key={i.id} className="flex items-center gap-2 mb-2">
+                        <input className="flex-1 px-3 py-2 rounded-xl border" placeholder="例: オンライン体験会×10回/月" value={i.title} onChange={e=>updateInitiative(o.id, i.id, { title: e.target.value })}/>
+                        <button className="p-2 rounded-xl border hover:bg-gray-50" onClick={()=>removeInitiative(o.id, i.id)}><Trash2 className="w-4 h-4"/></button>
+                      </div>
+                    ))}
+                    <button onClick={()=>addInitiative(o.id)} className="px-3 py-1.5 rounded-xl border flex items-center gap-1 hover:bg-gray-50 text-sm"><Plus className="w-4 h-4"/>取り組み追加</button>
+                  </div>
+
+                  {/* Dependencies */}
+                  <div className="mt-3">
+                    <div className="text-xs text-gray-500 mb-1">この目標は次の目標に依存（下層→上層へのつながり）</div>
+                    <DependencySelector bsc={bsc} currentId={o.id} value={o.dependsOn ?? []} onChange={(ids)=>setBSC(v=>({...v, objectives: v.objectives.map(x=>x.id===o.id?{...x, dependsOn: ids}:x)}))}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Strategy Map */}
+        <section className="space-y-4">
+          <div className="rounded-2xl border p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <ChevronRight className="w-4 h-4"/>
+              <div className="font-semibold">ストラテジーマップ（簡易プレビュー）</div>
+            </div>
+            <StrategyMap bsc={bsc}/>
+          </div>
+
+          <div className="rounded-2xl border p-3">
+            <div className="font-semibold mb-2">AIプロンプト（下書き生成用）</div>
+            <PromptLibrary bsc={bsc}/>
+          </div>
+        </section>
+      </main>
+
+      <footer className="max-w-6xl mx-auto px-4 pb-10 text-xs text-gray-500">
+        <div className="mt-6">© 2025 BSC Assistant MVP — 単一ファイル版（React + Tailwind）</div>
+      </footer>
+    </div>
+  );
+
+  // --- nested helpers ---
+  function updateKPI(objectiveId: string, kpiId: string, patch: Partial<KPI>) {
+    setBSC(v => ({
+      ...v,
+      objectives: v.objectives.map(o =>
+        o.id !== objectiveId ? o : { ...o, kpis: o.kpis.map(k => (k.id === kpiId ? { ...k, ...patch } : k)) },
+      ),
+    }));
+  }
+  function updateInitiative(objectiveId: string, initId: string, patch: Partial<Initiative>) {
+    setBSC(v => ({
+      ...v,
+      objectives: v.objectives.map(o =>
+        o.id !== objectiveId ? o : { ...o, initiatives: o.initiatives.map(i => (i.id === initId ? { ...i, ...patch } : i)) },
+      ),
+    }));
+  }
+}
+
+// --- Strategy Map ---
+function StrategyMap({ bsc }: { bsc: BSC }) {
+  // レイヤー: Learning → Internal → Customer → Financial
+  const layers: PerspectiveKey[] = ["Learning", "Internal", "Customer", "Financial"];
+  const layerObjs = layers.map(p => bsc.objectives.filter(o => o.perspective === p));
+
+  // ノード配置
+  const width = 700;
+  const rowHeight = 120;
+  const padding = 16;
+  const nodeW = 220;
+  const nodeH = 64;
+
+  const positions: Record<string, { x: number; y: number; p: PerspectiveKey }> = {};
+  layerObjs.forEach((objs, row) => {
+    const gap = (width - padding * 2 - nodeW) / Math.max(1, objs.length - 1 || 1);
+    objs.forEach((o, idx) => {
+      positions[o.id] = { x: padding + (objs.length === 1 ? (width - nodeW) / 2 : idx * gap), y: padding + row * rowHeight, p: o.perspective };
+    });
+  });
+
+  function color(p: PerspectiveKey) {
+    return PERSPECTIVES.find(x => x.key === p)!.color;
+  }
+
+  const edges: { from: string; to: string }[] = [];
+  for (const o of bsc.objectives) {
+    if (!o.dependsOn) continue;
+    for (const d of o.dependsOn) edges.push({ from: d, to: o.id });
+  }
+
+  return (
+    <div className="w-full overflow-x-auto">
+      <svg width={width} height={padding * 2 + rowHeight * layers.length} className="bg-white rounded-2xl border">
+        {/* edges */}
+        {edges.map((e, i) => {
+          const a = positions[e.from];
+          const b = positions[e.to];
+          if (!a || !b) return null;
+          const x1 = a.x + nodeW;
+          const y1 = a.y + nodeH / 2;
+          const x2 = b.x;
+          const y2 = b.y + nodeH / 2;
+          const mx = (x1 + x2) / 2;
+          return (
+            <g key={i}>
+              <path d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`} fill="none" stroke="#94a3b8" strokeWidth={2} />
+              <polygon points={`${x2-6},${y2-4} ${x2-6},${y2+4} ${x2},${y2}`} fill="#94a3b8" />
+            </g>
+          );
+        })}
+        {/* nodes */}
+        {bsc.objectives.map(o => {
+          const pos = positions[o.id];
+          if (!pos) return null;
+          return (
+            <g key={o.id}>
+              <rect x={pos.x} y={pos.y} rx={12} ry={12} width={nodeW} height={nodeH} fill={color(pos.p)} opacity={0.08} stroke={color(pos.p)} />
+              <foreignObject x={pos.x + 8} y={pos.y + 8} width={nodeW - 16} height={nodeH - 16}>
+                <div className="text-xs font-medium leading-tight" xmlns="http://www.w3.org/1999/xhtml">
+                  <div className="line-clamp-2">{o.title || "(無題)"}</div>
+                </div>
+              </foreignObject>
+            </g>
+          );
+        })}
+        {/* labels */}
+        {(["学習と成長","内部プロセス","顧客","財務"] as string[]).map((lab, i) => (
+          <text key={lab} x={8} y={padding + i * rowHeight - 6} fontSize={10} fill="#64748b">{lab}</text>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// --- Dependency selector ---
+function DependencySelector({ bsc, currentId, value, onChange }: { bsc: BSC; currentId: string; value: string[]; onChange: (ids: string[]) => void }) {
+  const opts = bsc.objectives.filter(o => o.id !== currentId);
+  return (
+    <div className="flex flex-wrap gap-2">
+      {opts.map(o => {
+        const checked = value.includes(o.id);
+        return (
+          <label key={o.id} className={`text-xs px-2 py-1 rounded-full border cursor-pointer ${checked?"bg-gray-900 text-white":"hover:bg-gray-50"}`}>
+            <input type="checkbox" className="hidden" checked={checked} onChange={(e)=>{
+              if (e.target.checked) onChange([...value, o.id]);
+              else onChange(value.filter(id=>id!==o.id));
+            }}/>
+            {PERSPECTIVES.find(x=>x.key===o.perspective)?.label}・{o.title || "(無題)"}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+// --- Prompt Library ---
+function PromptLibrary({ bsc }: { bsc: BSC }) {
+  const sys = `あなたはBSC（バランスト・スコアカード）のエキスパートです。日本語で、過度に抽象化せず、実務で使えるKPI・施策・仮説検証手順を提案してください。`;
+
+  const org = `組織: ${bsc.orgName}\n年度: ${bsc.fiscalYear}\nビジョン: ${bsc.vision}\n戦略テーマ: ${bsc.strategicThemes.join("、 ")}`;
+
+  const askObjectives = `上記の前提から、各視点（学習と成長→内部プロセス→顧客→財務）の順で、目的（Objective）を3〜5個ずつ提案してください。各目的に、候補KPI 3個、想定施策 2個、成功仮説・代替仮説を付してください。`;
+
+  const askKPIRefine = `以下の既存の目標とKPIを批判的にレビューし、SMART基準と可観測性の観点から改善案を提示してください。重みの初期値（%）も提案してください。\n${bsc.objectives.map(o=>`- [${o.perspective}] ${o.title} / KPI: ${o.kpis.map(k=>k.name).join("、 ")}`).join("\n")}`;
+
+  const askInitiatives = `KPI達成のための四半期アクションプラン（WBS）を、週次の成果物ベースで作ってください。リスク・指標・意思決定ポイントも含めてください。`;
+
+  const fullPrompt = `【システム】\n${sys}\n\n【前提】\n${org}\n\n【依頼1】\n${askObjectives}\n\n【依頼2】\n${askKPIRefine}\n\n【依頼3】\n${askInitiatives}`;
+
+  return (
+    <div className="space-y-3 text-xs">
+      <CopyBlock label="要件定義→Objective生成プロンプト" content={fullPrompt} />
+      <CopyBlock label="既存KPIのレビュー・改善プロンプト" content={askKPIRefine} />
+      <CopyBlock label="四半期アクションプラン作成プロンプト" content={askInitiatives} />
+    </div>
+  );
+}
+
+function CopyBlock({ label, content }: { label: string; content: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="border rounded-2xl p-3 bg-gray-50">
+      <div className="flex items-center gap-2 mb-2">
+        <Wand2 className="w-4 h-4"/>
+        <div className="font-medium">{label}</div>
+        <button onClick={()=>{navigator.clipboard.writeText(content); setCopied(true); setTimeout(()=>setCopied(false), 1200);}} className="ml-auto px-2 py-1 text-xs rounded border hover:bg-white">{copied?"コピーしました":"コピー"}</button>
+      </div>
+      <pre className="text-[11px] whitespace-pre-wrap leading-5">{content}</pre>
+    </div>
+  );
+}
+
+// --- helpers ---
+function numOrUndef(v: string): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function escapeCSV(s: any) {
+  const str = String(s);
+  if (str.includes(",") || str.includes("\n") || str.includes('"')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+# BSC-
